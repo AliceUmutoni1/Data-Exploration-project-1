@@ -1,0 +1,174 @@
+---
+title: " Alice Umutoni's Data Exploration Project"
+format: 
+  docx:
+    echo: true
+editor: visual
+---
+
+# Part 1: Cleaning data and importing Libraries
+
+## 1. Reading in the Google Trends data
+
+```{r}
+
+# Import libraries that will be used
+library(tidyverse)
+library(dplyr)
+library(lubridate)
+library(tidyr)
+library(purrr)
+library(stringr)
+library(fixest)
+library(rio)
+library(vtable)
+
+# List all files with 'trends' in their name from 'lab3_Rawdata' directory
+filelist <- list.files('lab3_Rawdata', pattern = 'trends', full.names = TRUE)
+
+# Import and bind the data together
+my_data <- import_list(filelist, fill = TRUE, rbind = TRUE)
+
+# Display variable names to verify data structure
+names(my_data)
+
+```
+
+## 2. Aggregating the Google Trends data
+
+```{r}
+
+# Process date information from 'monthorweek' string
+my_data <- my_data %>% 
+  mutate(week = str_sub(monthorweek, start = 1, end = 10)) %>% 
+  mutate(week = ymd(week)) %>% # Convert extracted string to date format
+  mutate(month = floor_date(week, unit = "month")) # Aggregate dates to the first of each month for monthly analysis
+
+  
+```
+
+```{r}
+# Standardize 'index' values by school and keyword for comparable scale
+my_data <- my_data %>%
+  group_by(schname, keyword) %>%
+  mutate(std_index = (index - mean(index, na.rm = TRUE)) / sd(index, na.rm = TRUE)) # Using na.rm = TRUE
+
+```
+
+## 3. Reading in the Scorecard data
+
+```{r}
+
+# Reading the scorecard data and the id name data
+scorecard <- import("./Lab3_Rawdata/Most+Recent+Cohorts+(Scorecard+Elements).csv")
+id_name_link <- import("./Lab3_Rawdata/id_name_link.csv")
+```
+
+## 4. Merge in the Scorecard data
+
+```{r}
+# Keep only unique school names in id_name_link
+id_name_link <- id_name_link %>%
+  group_by(schname) %>%
+  filter(n() == 1)
+
+# Rename 'UNITID' column in scorecard to 'unitid'
+colnames(scorecard)[colnames(scorecard) == "UNITID"] <- "unitid"
+
+# Join id_name_link with scorecard on 'unitid'
+id_link <- inner_join(id_name_link, scorecard, by = "unitid")
+
+# Join dataset with id_link on 'schname'
+gg_link <- inner_join(my_data, id_link, by = "schname")
+
+# Filter data to include only colleges that predominantly grant bachelor's degrees (PREDDEG == 3)
+gg_link <- gg_link %>%
+  filter(PREDDEG == 3)
+
+# Further processing can continue from here...
+# Export the filtered and joined data to a new CSV file for further analysis
+export(gg_link, "finaldata_bachelors.csv")
+new_data <- import("finaldata_bachelors.csv")
+```
+
+# Part 2: THE ANALYSIS
+
+```{r}
+
+# Calculate weekly average index with missing values handled
+week_data <- new_data %>%
+  group_by(schname, month) %>% # Group by school name and month for weekly averages
+  summarize(week_index = mean(std_index, na.rm = TRUE)) # Calculate mean with NA values removed
+
+```
+
+```{r}
+
+# Ensure earnings data is numeric
+new_data$`md_earn_wne_p10-REPORTED-EARNINGS` <- as.numeric(as.character(new_data$`md_earn_wne_p10-REPORTED-EARNINGS`))
+
+# Calculate mean, standard deviation, and income thresholds
+income.mean <- mean(na.omit(new_data$`md_earn_wne_p10-REPORTED-EARNINGS`))
+income.sd <- sd(na.omit(new_data$`md_earn_wne_p10-REPORTED-EARNINGS`))
+income.high <- income.mean + income.sd
+income.low <- income.mean - income.sd
+```
+
+```{r}
+
+# Create binary and trinary variables for Earnings based on calculated thresholds
+new_data <- new_data %>%
+  mutate(Earnings = ifelse(`md_earn_wne_p10-REPORTED-EARNINGS` >= income.mean, "High", "Low")) %>%
+  mutate(treated = case_when(
+    `md_earn_wne_p10-REPORTED-EARNINGS` >= income.high ~ "High",
+    `md_earn_wne_p10-REPORTED-EARNINGS` <= income.low ~ "Low",
+    TRUE ~ "Middle Income" # Covers all other cases
+  ))
+
+```
+
+```{r}
+
+# Prepare data for regression analysis by filtering to 'High' and 'Low' earnings colleges
+filtered_data <- new_data %>%
+  filter(Earnings %in% c("High", "Low")) %>%
+  mutate(treated = as.integer(Earnings == "High"), # Convert to binary (0 for Low, 1 for High)
+         post_treatment = as.integer(month >= as.Date("2015-09-01"))) # Binary variable for post-treatment
+```
+
+```{r}
+# Run the regression model
+reg_model <- feols(std_index ~ treated * post_treatment, data = filtered_data)
+
+# Output the regression model's table of results
+etable(reg_model)
+
+```
+
+```{r}
+# Plotting the trend in Google Searches for High vs. Low Earning Universities Pre and Post Scorecard Release
+ggplot(filtered_data, aes(x = month, y = std_index, color = Earnings)) +
+  geom_line(stat = "summary", fun = mean) +
+  labs(title = "Trend in Google Searches for High vs. Low Earning Universities Pre and Post Scorecard Release",
+       x = "Date",
+       y = "Standardized Search Index") +
+  geom_vline(xintercept = as.numeric(as.Date("2015-09-01")), linetype = "dashed", color = "red") +
+  scale_color_manual(values = c("High" = "blue", "Low" = "orange")) +
+  theme_minimal() +
+  theme(legend.title = element_blank(), legend.position = "bottom")
+```
+
+# Part 3: The write-up
+
+\
+In the Data Exploration Project, the task at hand was to discern the impact of the College Scorecard's release on student interest in universities, as indicated by search trends on Google. We first did data cleaning which was guided by a focus on universities that predominantly grant bachelor's degrees.
+
+The data standardization involved normalizing the Google Trends indices, which are inherently relative, to facilitate comparison across different search terms and universities. This was achieved by subtracting the mean and dividing by the standard deviation for each term within a university. The College Scorecard data, with its wealth of information on U.S. colleges, was then merged using school names after weeding out instances of non-unique identifiers. This merging process was crucial in linking the Google search trends with the economic outcomes of the educational institutions.
+
+A regression model was constructed to examine the interaction between the college earnings category and the timing of the Scorecard's release. The model included binary variables for the earnings category and the pre- and post- release period of the Scorecard. The graph, which served as a visual aid, underscored the trend in Google searches for high versus low-earning universities before and after the Scorecard's release. The dashed vertical line represented the pivotal moment of the Scorecard's introduction to the public domain.
+
+The interpretation of the regression coefficients revealed a noteworthy trend: the introduction of the College Scorecard appeared to decrease the search activity for high-earning colleges. Specifically, the interaction term between high-earning colleges and the post-treatment period was significant and negative, suggesting a shift in student interest away from these institutions post-release.
+
+In conclusion, the analysis found that the introduction of the College Scorecard decreased search activity on Google Trends for colleges with high-earning graduates by a specific numeric value, which can be filled in from the regression output, with a standard error corresponding to the one reported for the interaction term in the regression results. This effect is directly attributable to the treated x post_treatment coefficient, which captures the change in search behavior for high-earning colleges after the release of the Scorecard relative to low-earning ones.
+
+**The introduction of the College Scorecard decreased search activity on Google Trends for colleges with high-earning graduates by a coefficient of -0.0966, relative to what it did for colleges with low-earning graduates, with a standard error of 0.0054. This result comes from the treated x post_treatment coefficient(s) in my regression.**
